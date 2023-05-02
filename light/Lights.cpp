@@ -1,145 +1,281 @@
 /*
- * Copyright (C) 2021-2022 The LineageOS Project
+ * Copyright (C) 2019 The LineageOS Project
  *
- * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-#include "Lights.h"
+#define LOG_TAG "LightService"
 
-#include <android-base/logging.h>
-#include "LED.h"
-#include "Utils.h"
+#include <log/log.h>
 
-namespace aidl {
+#include "Light.h"
+
+#include <fstream>
+
+#define LEDS            "/sys/class/leds/"
+
+#define BUTTON_LED      LEDS "button-backlight/"
+#define LCD_LED         LEDS "lcd-backlight/"
+#define RED_LED         LEDS "red/"
+#define GREEN_LED       LEDS "green/"
+#define BLUE_LED        LEDS "blue/"
+
+#define BLINK           "blink"
+#define BRIGHTNESS      "brightness"
+
+#define MAX_LED_BRIGHTNESS    255
+#define MAX_LCD_BRIGHTNESS    255
+
+namespace {
+/*
+ * Write value to path and close file.
+ */
+static void set(std::string path, std::string value) {
+    std::ofstream file(path);
+
+    if (!file.is_open()) {
+        ALOGW("failed to write %s to %s", value.c_str(), path.c_str());
+        return;
+    }
+
+    file << value;
+}
+
+static void set(std::string path, int value) {
+    set(path, std::to_string(value));
+}
+
+static uint32_t getBrightness(const LightState& state) {
+    uint32_t alpha, red, green, blue;
+
+    /*
+     * Extract brightness from AARRGGBB.
+     */
+    alpha = (state.color >> 24) & 0xFF;
+    red = (state.color >> 16) & 0xFF;
+    green = (state.color >> 8) & 0xFF;
+    blue = state.color & 0xFF;
+
+    /*
+     * Scale RGB brightness using Alpha brightness.
+     */
+    red = red * alpha / 0xFF;
+    green = green * alpha / 0xFF;
+    blue = blue * alpha / 0xFF;
+
+    return (77 * red + 150 * green + 29 * blue) >> 8;
+}
+
+static inline uint32_t scaleBrightness(uint32_t brightness, uint32_t maxBrightness) {
+    if (brightness == 0) {
+        return 0;
+    }
+
+    return (brightness - 1) * (maxBrightness - 1) / (0xFF - 1) + 1;
+}
+
+static inline uint32_t getScaledBrightness(const LightState& state, uint32_t maxBrightness) {
+    return scaleBrightness(getBrightness(state), maxBrightness);
+}
+
+static void handleBacklight(const LightState& state) {
+    uint32_t brightness = getScaledBrightness(state, MAX_LCD_BRIGHTNESS);
+    set(LCD_LED BRIGHTNESS, brightness);
+}
+
+static void handleButtons(const LightState& state) {
+     uint32_t brightness = getScaledBrightness(state, MAX_LED_BRIGHTNESS);
+     set(BUTTON_LED BRIGHTNESS, brightness);
+}
+
+static void handleNotification(const LightState& state) {
+    int blink, onMs, offMs, red, green, blue;
+    uint32_t alpha;
+
+    // Extract brightness from AARRGGBB
+    alpha = (state.color >> 24) & 0xff;
+    red = (state.color >> 16) & 0xff;
+    green = (state.color >> 8) & 0xff;
+    blue = state.color & 0xff;
+
+    // Scale RGB brightness if Alpha brightness is not 0xFF
+    if (alpha != 0xff) {
+        red = (red * alpha) / 0xff;
+        green = (green * alpha) / 0xff;
+        blue = (blue * alpha) / 0xff;
+    }
+
+    switch (state.flashMode) {
+        case Flash::TIMED:
+            onMs = state.flashOnMs;
+            offMs = state.flashOffMs;
+            break;
+        case Flash::NONE:
+        default:
+            onMs = 0;
+            offMs = 0;
+            break;
+    }
+
+    if (onMs > 0 && offMs > 0) {
+        /*
+         * if ON time == OFF time
+         *   use blink mode 2
+         * else
+         *   use blink mode 1
+         */
+        if (onMs == offMs) {
+            blink = 2;
+        } else {
+            blink = 1;
+        }
+    } else {
+        blink = 0;
+    }
+
+    /* Disable blinking. */
+    set(RED_LED BLINK, 0);
+    set(GREEN_LED BLINK, 0);
+    set(BLUE_LED BLINK, 0);
+
+    /* Enable blinking */
+    if (blink){
+        if (red)
+            set(RED_LED BLINK, blink);
+        if (green)
+            set(GREEN_LED BLINK, blink);
+        if (blue)
+            set(BLUE_LED BLINK, blink);
+    } else {
+        if (red == 0 && green == 0 && blue == 0) {
+            set(RED_LED BLINK, 0);
+            set(GREEN_LED BLINK, 0);
+            set(BLUE_LED BLINK, 0);
+        }
+        set(RED_LED BRIGHTNESS, red);
+        set(GREEN_LED BRIGHTNESS, green);
+        set(BLUE_LED BRIGHTNESS, blue);
+    }
+}
+
+static inline bool isStateLit(const LightState& state) {
+    return state.color & 0x00ffffff;
+}
+
+static inline bool isStateEqual(const LightState& first, const LightState& second) {
+    if (first.color == second.color && first.flashMode == second.flashMode &&
+            first.flashOnMs == second.flashOnMs &&
+            first.flashOffMs == second.flashOffMs &&
+            first.brightnessMode == second.brightnessMode) {
+        return true;
+    }
+
+    return false;
+}
+
+/* Keep sorted in the order of importance. */
+static std::vector<LightBackend> backends = {
+    { Type::ATTENTION, handleNotification },
+    { Type::NOTIFICATIONS, handleNotification },
+    { Type::BATTERY, handleNotification },
+    { Type::BACKLIGHT, handleBacklight },
+    { Type::BUTTONS, handleButtons },
+};
+
+static LightStateHandler findHandler(Type type) {
+    for (const LightBackend& backend : backends) {
+        if (backend.type == type) {
+            return backend.handler;
+        }
+    }
+
+    return nullptr;
+}
+
+static LightState findLitState(LightStateHandler handler) {
+    LightState emptyState;
+
+    for (const LightBackend& backend : backends) {
+        if (backend.handler == handler) {
+            if (isStateLit(backend.state)) {
+                return backend.state;
+            }
+
+            emptyState = backend.state;
+        }
+    }
+
+    return emptyState;
+}
+
+static void updateState(Type type, const LightState& state) {
+    for (LightBackend& backend : backends) {
+        if (backend.type == type) {
+            backend.state = state;
+        }
+    }
+}
+
+}  // anonymous namespace
+
 namespace android {
 namespace hardware {
 namespace light {
+namespace V2_0 {
+namespace implementation {
 
-static const std::string kAllButtonsPaths[] = {
-    "/sys/class/leds/button-backlight/brightness",
-    "/sys/class/leds/button-backlight1/brightness",
-};
+Return<Status> Light::setLight(Type type, const LightState& state) {
+    /* Lock global mutex until light state is updated. */
+    std::lock_guard<std::mutex> lock(globalLock);
 
-enum led_type {
-    RED,
-    GREEN,
-    BLUE,
-    WHITE,
-    MAX_LEDS,
-};
-
-static LED kLEDs[MAX_LEDS] = {
-    [RED] = LED("red"),
-    [GREEN] = LED("green"),
-    [BLUE] = LED("blue"),
-    [WHITE] = LED("white"),
-};
-
-#define AutoHwLight(light) {.id = (int32_t)light, .type = light, .ordinal = 0}
-
-static const HwLight kBacklightHwLight = AutoHwLight(LightType::BACKLIGHT);
-static const HwLight kBatteryHwLight = AutoHwLight(LightType::BATTERY);
-static const HwLight kButtonsHwLight = AutoHwLight(LightType::BUTTONS);
-static const HwLight kNotificationHwLight = AutoHwLight(LightType::NOTIFICATIONS);
-
-Lights::Lights() {
-    mBacklightDevice = getBacklightDevice();
-    if (mBacklightDevice) {
-        mLights.push_back(kBacklightHwLight);
+    LightStateHandler handler = findHandler(type);
+    if (!handler) {
+        /* If no handler has been found, then the type is not supported. */
+        return Status::LIGHT_NOT_SUPPORTED;
     }
 
-    for (auto& buttons : kAllButtonsPaths) {
-        if (!fileWriteable(buttons))
-            continue;
+    /* Find the old state of the current handler. */
+    LightState oldState = findLitState(handler);
 
-        mButtonsPaths.push_back(buttons);
+    /* Update the cached state value for the current type. */
+    updateState(type, state);
+
+    /* Find the new state of the current handler. */
+    LightState newState = findLitState(handler);
+
+    if (isStateEqual(oldState, newState)) {
+        return Status::SUCCESS;
     }
 
-    if (!mButtonsPaths.empty())
-        mLights.push_back(kButtonsHwLight);
+    handler(newState);
 
-    mWhiteLED = kLEDs[WHITE].exists();
-
-    mLights.push_back(kBatteryHwLight);
-    mLights.push_back(kNotificationHwLight);
+    return Status::SUCCESS;
 }
 
-ndk::ScopedAStatus Lights::setLightState(int32_t id, const HwLightState& state) {
-    rgb_t color(state.color);
-    rgb_t batteryStateColor;
+Return<void> Light::getSupportedTypes(getSupportedTypes_cb _hidl_cb) {
+    std::vector<Type> types;
 
-    LightType type = static_cast<LightType>(id);
-    switch (type) {
-        case LightType::BACKLIGHT:
-            if (mBacklightDevice)
-                mBacklightDevice->setBacklight(color.toBrightness());
-            break;
-        case LightType::BUTTONS:
-            for (auto& buttons : mButtonsPaths)
-                writeToFile(buttons, color.isLit());
-            break;
-        case LightType::BATTERY:
-        case LightType::NOTIFICATIONS:
-            mLEDMutex.lock();
-            if (type == LightType::BATTERY)
-                mLastBatteryState = state;
-            else
-                mLastNotificationState = state;
-            batteryStateColor = rgb_t(mLastBatteryState.color);
-            setLED(batteryStateColor.isLit() ? mLastBatteryState : mLastNotificationState);
-            mLEDMutex.unlock();
-            break;
-        default:
-            return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
-            break;
+    for (const LightBackend& backend : backends) {
+        types.push_back(backend.type);
     }
 
-    return ndk::ScopedAStatus::ok();
+    _hidl_cb(types);
+
+    return Void();
 }
 
-ndk::ScopedAStatus Lights::getLights(std::vector<HwLight> *_aidl_return) {
-    for (auto& light : mLights)
-        _aidl_return->push_back(light);
-
-    return ndk::ScopedAStatus::ok();
-}
-
-void Lights::setLED(const HwLightState& state) {
-    bool rc = true;
-    rgb_t color(state.color);
-    uint8_t blink = (state.flashOnMs != 0 && state.flashOffMs != 0);
-
-    switch (state.flashMode) {
-        case FlashMode::HARDWARE:
-        case FlashMode::TIMED:
-            if (mWhiteLED) {
-                rc = kLEDs[WHITE].setBreath(blink);
-            } else {
-                if (!!color.red)
-                    rc &= kLEDs[RED].setBreath(blink);
-                if (!!color.green)
-                    rc &= kLEDs[GREEN].setBreath(blink);
-                if (!!color.blue)
-                    rc &= kLEDs[BLUE].setBreath(blink);
-            }
-            if (rc)
-                break;
-            FALLTHROUGH_INTENDED;
-        default:
-            if (mWhiteLED) {
-                rc = kLEDs[WHITE].setBrightness(color.toBrightness());
-            } else {
-                rc = kLEDs[RED].setBrightness(color.red);
-                rc &= kLEDs[GREEN].setBrightness(color.green);
-                rc &= kLEDs[BLUE].setBrightness(color.blue);
-            }
-            break;
-    }
-
-    return;
-}
-
-} // namespace light
-} // namespace hardware
-} // namespace android
-} // namespace aidl
+}  // namespace implementation
+}  // namespace V2_0
+}  // namespace light
+}  // namespace hardware
+}  // namespace android
