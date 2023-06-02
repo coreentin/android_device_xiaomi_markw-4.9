@@ -48,7 +48,7 @@ TARGET_VENDOR_PROP := $(DEVICE_PATH)/vendor.prop
 TARGET_KERNEL_CONFIG := markw_defconfig
 BOARD_KERNEL_BASE := 0x80000000
 BOARD_KERNEL_CMDLINE := androidboot.hardware=qcom msm_rtb.filter=0x237 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 androidboot.bootdevice=7824900.sdhci earlycon=msm_hsl_uart,0x78af000 loop.max_part=16 androidboot.usbconfigfs=true
-BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
+#BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
 BOARD_KERNEL_IMAGE_NAME := Image.gz-dtb
 BOARD_KERNEL_PAGESIZE :=  2048
 BOARD_MKBOOTIMG_ARGS := --ramdisk_offset 0x01000000 --tags_offset 0x00000100
@@ -71,9 +71,6 @@ BOARD_USES_ALSA_AUDIO := true
 TARGET_BOOTLOADER_BOARD_NAME := MSM8953
 TARGET_NO_BOOTLOADER := true
 
-# Bootanimation
-TARGET_BOOTANIMATION_HALF_RES := true
-
 # Camera
 USE_DEVICE_SPECIFIC_CAMERA := true
 TARGET_USES_QTI_CAMERA_DEVICE := true
@@ -81,11 +78,12 @@ BOARD_QTI_CAMERA_32BIT_ONLY := true
 TARGET_SUPPORT_HAL1 := false
 TARGET_TS_MAKEUP := true
 CAMERA_DAEMON_NOT_PRESENT := true
+MALLOC_SVELTE_FOR_LIBC32 := true
 
 # Display
 USE_DEVICE_SPECIFIC_DISPLAY := true
 DEVICE_SPECIFIC_DISPLAY_PATH := $(DEVICE_PATH)/qcom-caf/display
-TARGET_SCREEN_DENSITY := 420
+TARGET_SCREEN_DENSITY := 440
 TARGET_USES_ION := true
 TARGET_USES_GRALLOC1 := true
 TARGET_USES_HWC2 := true
@@ -140,7 +138,7 @@ BOARD_VENDORIMAGE_PARTITION_SIZE := 536870912 # /cust
 TARGET_PER_MGR_ENABLED := true
 
 # Power
-TARGET_TAP_TO_WAKE_NODE := "/proc/sys/dev/dt2w"
+TARGET_TAP_TO_WAKE_NODE := "/proc/gesture/onoff"
 TARGET_USES_INTERACTION_BOOST := true
 
 # Qualcomm
@@ -160,6 +158,7 @@ VENDOR_SECURITY_PATCH := 2022-09-05
 include device/qcom/sepolicy-legacy-um/SEPolicy.mk
 BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy/vendor
 SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy/private
+SELINUX_IGNORE_NEVERALLOWS := true
 
 # Treble
 PRODUCT_FULL_TREBLE_OVERRIDE := true
