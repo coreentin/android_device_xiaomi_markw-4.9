@@ -224,9 +224,9 @@ PRODUCT_PACKAGES += \
     FlipFlap
 
 # FM
-PRODUCT_PACKAGES += \
-    RevampedFMRadio \
-    libqcomfmjni:64
+#PRODUCT_PACKAGES += \
+#    RevampedFMRadio \
+#    libqcomfmjni:64
 
 # Fwk-detect
 PRODUCT_PACKAGES += \
